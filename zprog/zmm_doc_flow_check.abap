@@ -1,13 +1,27 @@
-*&---------------------------------------------------------------------*
+*&-----------------------------------------------------------------------*
 *& Report ZMM_DOC_FLOW_CHECK
-*&---------------------------------------------------------------------*
-*&
-*&---------------------------------------------------------------------*
+*&-----------------------------------------------------------------------*
+* Title     : MM Document Flow Control Report (Internal PO)
+*------------------------------------------------------------------------*
+* Programmer: Engin Akdeniz
+*------------------------------------------------------------------------*
+* Description: PO Life-Circle Process Check
+*------------------------------------------------------------------------*
+
+**************************************************************************
+*             H I S T O R Y   O F   R E V I S I O N S
+**************************************************************************
+*       Date          Programmer         Incident #         Description
+*  ---------------  -------------------  -------------    ---------------*
+*  23.02.2023       Engin Akdeniz                          New Development
+*
+*------------------------------------------------------------------------*
+
 REPORT zmm_doc_flow_check.
 
 INCLUDE zmm_i_3rdparty_create_po_cls.
 
-TABLES: ekpo.
+TABLES: ekko, ekpo.
 
 TYPES : BEGIN OF ty_data,
           ebeln_s       TYPE ekpo-ebeln,          "Ithalat SAS(Kaynak SAS)
@@ -109,9 +123,13 @@ ENDCLASS.
 
 SELECTION-SCREEN BEGIN OF BLOCK blk1 WITH FRAME TITLE TEXT-001.
   SELECT-OPTIONS: s_ebeln FOR ekpo-ebeln.
+  SELECT-OPTIONS: s_ernam FOR ekko-ernam DEFAULT sy-uname.
+  SELECT-OPTIONS: s_werks FOR ekpo-werks.
+  SELECT-OPTIONS: s_aedat FOR ekko-aedat.
 SELECTION-SCREEN END OF BLOCK blk1.
 
 START-OF-SELECTION.
+  PERFORM check_werks_auth.
   PERFORM get_data.
 
 END-OF-SELECTION.
@@ -119,8 +137,6 @@ END-OF-SELECTION.
 
 *&---------------------------------------------------------------------*
 *& Form get_data
-*&---------------------------------------------------------------------*
-*& text
 *&---------------------------------------------------------------------*
 FORM get_data .
 
@@ -137,8 +153,17 @@ FORM get_data .
   CLEAR: ls_docnum_ebeln, lt_docnum_ebeln[],
          gs_data, gt_data[].
 
-  SELECT ebeln AS ebeln_s, matnr, zz_purch_type FROM ekpo INTO TABLE @DATA(lt_ekpo)
-    WHERE ebeln IN @s_ebeln.
+  SELECT
+      p~ebeln AS ebeln_s,
+      p~matnr,
+      p~zz_purch_type
+    FROM ekpo AS p INNER JOIN ekko AS k ON k~ebeln = p~ebeln
+    WHERE k~ebeln IN @s_ebeln
+      AND k~ernam IN @s_ernam
+      AND p~werks IN @s_werks
+      AND p~aedat IN @s_aedat
+      AND p~menge NE 0
+      AND p~loekz IS INITIAL  INTO TABLE @DATA(lt_ekpo).
 
   SELECT srrelroles_idoc~objkey srrelroles_ekko~objkey
     INTO (lv_objkey_docnum, lv_objkey_ebeln)
@@ -185,7 +210,8 @@ FORM get_data .
           WHERE docnum = ls_docnum_ebeln-docnum
             AND countr IS NOT INITIAL.
 
-        APPEND INITIAL LINE TO gs_data-docmessages ASSIGNING FIELD-SYMBOL(<fs_msg>).
+        APPEND INITIAL LINE TO gs_data-docmessages
+          ASSIGNING FIELD-SYMBOL(<fs_msg>).
         <fs_msg>-id = ls_edids-stamid.
         <fs_msg>-number = ls_edids-stamno.
 
@@ -202,12 +228,14 @@ FORM get_data .
         <fs_msg>-message_v4 = ls_edids-stapa4.
 
         "Sipariş No
-        IF ls_edids-status = '53' AND ls_edids-stamid = 'V1' AND ls_edids-stamno = '311'.
+        IF ls_edids-status = '53'
+         AND ls_edids-stamid = 'V1'
+         AND ls_edids-stamno = '311'.
+
           gs_data-vbeln = |{ ls_edids-stapa2 ALPHA = IN }| .
           gs_data-docstatus = icon_green_light.
 
           PERFORM atc_skip01 CHANGING gs_data.
-
 
         ENDIF.
 
@@ -231,8 +259,6 @@ ENDFORM.
 
 *&---------------------------------------------------------------------*
 *& Form diplay_report
-*&---------------------------------------------------------------------*
-*& text
 *&---------------------------------------------------------------------*
 FORM diplay_report .
 
@@ -265,8 +291,6 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 *& Form dislplay_idoc_messages
 *&---------------------------------------------------------------------*
-*& text
-*&---------------------------------------------------------------------*
 FORM display_messages USING ps_row_no TYPE lvc_s_roid
                              pv_colnam.
 
@@ -288,9 +312,7 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 *& Form call_zmm180
 *&---------------------------------------------------------------------*
-*& text
-*&---------------------------------------------------------------------*
-*&      --> P_INDEX
+*& Calls a external program and gets error messages from there
 *&---------------------------------------------------------------------*
 FORM call_zmm180 USING u_index.
 
@@ -434,16 +456,15 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 *& Form call_tcode
 *&---------------------------------------------------------------------*
-*& text
-*&---------------------------------------------------------------------*
-*&      --> VALUE
+*& Call T-Code
 *&---------------------------------------------------------------------*
 FORM call_tcode  USING u_tcode  u_parid  u_parval.
   DATA: spa_tab TYPE STANDARD TABLE OF rfc_spagpa WITH HEADER LINE.
 
-  "Parametere id of the screen field matnr on mm03 first screen
+  "Parametere id of the screen field
+  "  (example: matnr on mm03 first screen)
   spa_tab-parid = u_parid.
-  spa_tab-parval = u_parval. " Material Name
+  spa_tab-parval = u_parval. " Material/Document No..
   APPEND spa_tab.
   CLEAR spa_tab.
 
@@ -502,7 +523,7 @@ ENDFORM.          " progress_bar
 *&---------------------------------------------------------------------*
 *& Form atc_skip01
 *&---------------------------------------------------------------------*
-*& text
+*& To pass ATC Checks
 *&---------------------------------------------------------------------*
 FORM atc_skip01  CHANGING ps_data TYPE ty_data.
   SELECT SINGLE a~werks, e~banfn, n~ebeln FROM vbap AS a
@@ -513,4 +534,27 @@ FORM atc_skip01  CHANGING ps_data TYPE ty_data.
     WHERE a~vbeln = @ps_data-vbeln
       AND a~matnr = @ps_data-matnr
         INTO ( @ps_data-werks, @ps_data-banfn, @ps_data-ebeln_t ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& Form check_werks_auth
+*&---------------------------------------------------------------------*
+*& Checks User's Authority on Plant
+*&---------------------------------------------------------------------*
+FORM check_werks_auth.
+
+  SELECT werks FROM t001w
+    WHERE werks IN @s_werks INTO TABLE @DATA(lt_t001w).
+
+  LOOP AT lt_t001w INTO DATA(ls_t001w).
+
+    AUTHORITY-CHECK OBJECT 'M_BEST_WRK'
+     ID 'ACTVT' FIELD '01'
+     ID 'WERKS' FIELD ls_t001w-werks.
+    IF sy-subrc <> 0.
+      MESSAGE s324(zmm) WITH ls_t001w-werks DISPLAY LIKE 'E'.
+      LEAVE LIST-PROCESSING.
+    ENDIF.
+
+  ENDLOOP.
 ENDFORM.
